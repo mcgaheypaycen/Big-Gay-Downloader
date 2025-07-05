@@ -4,6 +4,7 @@
 
 - **Full UI Redesign**: The entire interface was redesigned for a modern, classy, and cozy look, with improved spacing, color palette, and usability.
 - **CustomTkinter Migration**: The app now uses [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) for a high-tech, modern widget set and better dark mode support.
+- **Added Xtube video support*: The app is now able to accept Xtube video links as well as YouTube.
 - **No More Mode Toggle**: Users can now paste either YouTube or XVideos links directly—no need to switch modes. The app auto-detects the platform and processes accordingly.
 - **Automatic Platform Detection**: The backend now detects whether a link is YouTube or XVideos and validates/handles it appropriately.
 - **Improved .gitignore**: The repository now excludes build artifacts, binaries, and cache files for a clean, professional codebase.
