@@ -82,9 +82,6 @@ class BigGayDownloader:
         except Exception as e:
             print(f"Could not set window icon: {e}")
         
-        # Center the window on screen
-        self._center_window()
-        
         # Initialize components
         self.downloader = Downloader()
         self.file_converter = FileConverter()
@@ -99,6 +96,9 @@ class BigGayDownloader:
         
         # Setup UI
         self._setup_ui()
+        
+        # Center the window on screen (after UI setup for accurate dimensions)
+        self._center_window()
         
         # Setup UI update timer
         self._setup_ui_updates()
@@ -250,7 +250,16 @@ class BigGayDownloader:
         def completion_callback(success: bool, message: str):
             if success:
                 self.root.title("Big Gay Downloader")
-                messagebox.showinfo("Installation Complete", f"yt-dlp has been installed successfully!\n\n{message}")
+                messagebox.showinfo(
+                    "Installation Complete! 🎉", 
+                    f"yt-dlp has been installed successfully!\n\n"
+                    f"yt-dlp is a powerful video downloader that enables this application to download videos from YouTube and other platforms.\n\n"
+                    f"You can now:\n"
+                    f"• Download videos from YouTube and XVideos\n"
+                    f"• Convert videos to MP3 or MP4 format\n"
+                    f"• Use all the features of Big Gay Downloader\n\n"
+                    f"Welcome to the app! 🏳️‍🌈"
+                )
             else:
                 self.root.title("Big Gay Downloader")
                 print('ERROR: Installation Failed')
@@ -277,7 +286,19 @@ class BigGayDownloader:
     
     def _show_update_notification(self, update_info: dict):
         """Show update notification dialog."""
-        def update_callback(progress_callback, completion_callback):
+        def update_callback():
+            # Create simple progress and completion callbacks for the update
+            def progress_callback(status: InstallerStatus, progress: float, message: str):
+                print(f"Update progress: {progress:.1f}% - {message}")
+            
+            def completion_callback(success, message):
+                if success:
+                    print("Update completed successfully")
+                    messagebox.showinfo("Update Complete", f"yt-dlp has been updated successfully!\n\n{message}")
+                else:
+                    print(f"Update failed: {message}")
+                    messagebox.showerror("Update Failed", f"Failed to update yt-dlp:\n\n{message}")
+            
             self.first_launch_manager.update_yt_dlp_async(progress_callback, completion_callback)
         
         UpdateNotificationDialog(
@@ -299,9 +320,7 @@ class BigGayDownloader:
                 UpdateDialog(
                     self.root,
                     update_info["current_version"],
-                    update_info["latest_version"],
-                    update_callback,
-                    update_info.get("release_notes", "")
+                    update_info["latest_version"]
                 )
             else:
                 from tkinter import messagebox
