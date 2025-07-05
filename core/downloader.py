@@ -12,7 +12,7 @@ from typing import Optional, Callable
 from pathlib import Path
 
 from core.queue import DownloadJob, JobStatus
-from core.utils import sanitize_filename, sanitize_url
+from core.utils import sanitize_filename, sanitize_url, is_adult_content_site, resource_path, find_ffmpeg
 
 
 class DownloadError(Exception):
@@ -74,46 +74,23 @@ class Downloader:
         print(f"[DEBUG] Detected ffmpeg path: {self._ffmpeg_path}")
         print(f"[DEBUG] Detected yt-dlp path: {self._yt_dlp_path}")
     
-    def _find_ffmpeg(self) -> Optional[str]:
-        """Find ffmpeg executable, always prefer bundled version for packaging."""
-        # PyInstaller sets sys._MEIPASS to the temp folder where it extracts files
-        if hasattr(sys, '_MEIPASS'):  # type: ignore
-            base_path = Path(sys._MEIPASS)  # type: ignore
-        else:
-            base_path = Path(__file__).parent.parent
-        ffmpeg_path = base_path / 'assets' / 'ffmpeg' / ('ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg')
-        print(f"[DEBUG] Looking for bundled ffmpeg at: {ffmpeg_path}")
-        if ffmpeg_path.exists():
-            return str(ffmpeg_path)
-        # Fallback: try system ffmpeg
-        return 'ffmpeg'
+    def _find_ffmpeg(self) -> str:
+        """Find ffmpeg executable, prefer bundled version for packaging."""
+        return find_ffmpeg()
     
     def _find_yt_dlp(self) -> str:
-        """Find yt-dlp executable, prefer bundled version for packaging."""
-        # PyInstaller sets sys._MEIPASS to the temp folder where it extracts files
-        if hasattr(sys, '_MEIPASS'):  # type: ignore
-            base_path = Path(sys._MEIPASS)  # type: ignore
-        else:
-            base_path = Path(__file__).parent.parent
-        
-        # Look for bundled yt-dlp in the root directory
-        yt_dlp_path = base_path / ('yt-dlp.exe' if sys.platform == 'win32' else 'yt-dlp')
-        print(f"[DEBUG] Looking for bundled yt-dlp at: {yt_dlp_path}")
-        if yt_dlp_path.exists():
-            return str(yt_dlp_path)
-        
-        # Check for installed yt-dlp from our installer
+        """Find yt-dlp executable, use existing installer."""
+        # Use the existing yt-dlp installer to find the path
         try:
             from core.first_launch import FirstLaunchManager
             manager = FirstLaunchManager()
-            installed_path = manager.installer.get_yt_dlp_path()
-            if installed_path and installed_path != 'yt-dlp':
-                print(f"[DEBUG] Found installed yt-dlp at: {installed_path}")
-                return installed_path
+            yt_dlp_path = manager.installer.get_yt_dlp_path()
+            if yt_dlp_path:
+                return yt_dlp_path
         except Exception as e:
-            print(f"[DEBUG] Failed to check installed yt-dlp: {e}")
+            print(f"[DEBUG] Failed to get yt-dlp path from installer: {e}")
         
-        # Fallback: try system yt-dlp
+        # Fallback to system yt-dlp
         return 'yt-dlp'
     
     def download_with_retry(self, job: DownloadJob, progress_callback: Optional[Callable] = None, max_retries: int = 3):
@@ -173,16 +150,26 @@ class Downloader:
                 return
             
             # Sanitize and validate the URL
-            sanitized_url = sanitize_url(job.url)
+            sanitized_url = sanitize_url(job.url, job.mode)
             print(f"[DEBUG] Downloader: sanitized_url={sanitized_url}")
             
             # First, get video info to extract metadata
-            video_info = self.get_video_info(sanitized_url)
+            video_info = self.get_video_info(sanitized_url, job.mode)
             if video_info:
                 metadata = self._extract_metadata(video_info)
+                # Add webpage_url to metadata for enhanced processing
+                metadata['webpage_url'] = video_info.get('webpage_url', sanitized_url)
                 # Update job title with processed title only if not manually renamed
                 if metadata.get('title') and not getattr(job, 'custom_title', None):
                     job.title = metadata['title']
+                
+                # Use webpage_url for the actual download if available
+                download_url = video_info.get('webpage_url', sanitized_url)
+                print(f"[DEBUG] Downloader: Using download_url={download_url} (original={sanitized_url})")
+            else:
+                metadata = {}
+                download_url = sanitized_url
+                print(f"[DEBUG] Downloader: No video info available, using original URL={download_url}")
             
             # Check again if job was cancelled during metadata fetch
             if job.status == JobStatus.FAILED:
@@ -213,7 +200,7 @@ class Downloader:
             # Build yt-dlp command, passing unique_output_path if set
             output_template = unique_output_path if unique_output_path is not None else os.path.join(job.output_folder, '%(title)s.%(ext)s')
             meta = metadata if video_info else {}
-            cmd = self._build_command(sanitized_url, output_template, job, meta)
+            cmd = self._build_command(download_url, output_template, job, meta)
             print(f"[DEBUG] Downloader: Running yt-dlp command: {' '.join([str(c) for c in cmd])}")
             
             # Final check before starting subprocess
@@ -401,22 +388,79 @@ class Downloader:
                 '--parse-metadata', f'title:{metadata.get("title", "%(title)s")}',
                 '--parse-metadata', f'uploader:{metadata.get("artist", "%(uploader)s")}',
                 '--parse-metadata', f'channel:{metadata.get("album", "%(channel)s")}',
-                '--parse-metadata', f'upload_date:{metadata.get("upload_date", "%(upload_date)s")}',
             ])
+            
+            # Handle upload_date carefully - adult sites may not provide this
+            upload_date = metadata.get("upload_date", "")
+            if upload_date and upload_date != "NA" and upload_date != "":
+                cmd.extend(['--parse-metadata', f'upload_date:{upload_date}'])
+            else:
+                # Skip upload_date parsing for adult content sites
+                print(f"[DEBUG] Skipping upload_date parsing - not available for this content")
             
             # Add custom metadata fields for artist and album using proper syntax
             if metadata.get("artist"):
                 cmd.extend(['--parse-metadata', f'artist:{metadata["artist"]}'])
             if metadata.get("album"):
                 cmd.extend(['--parse-metadata', f'album:{metadata["album"]}'])
+            
+            # Enhanced metadata for XVideos content
+            webpage_url = metadata.get('webpage_url', '')
+            is_xvideos = 'xvideos.com' in webpage_url if webpage_url else False
+            
+            if is_xvideos:
+                print(f"[DEBUG] Adding enhanced metadata for XVideos content")
+                
+                # Add keywords/tags
+                if metadata.get("keywords"):
+                    cmd.extend(['--parse-metadata', f'keywords:{metadata["keywords"]}'])
+                
+                # Add genre/categories
+                if metadata.get("genre"):
+                    cmd.extend(['--parse-metadata', f'genre:{metadata["genre"]}'])
+                
+                # Add view count
+                if metadata.get("view_count"):
+                    cmd.extend(['--parse-metadata', f'view_count:{metadata["view_count"]}'])
+                
+                # Add like count
+                if metadata.get("like_count"):
+                    cmd.extend(['--parse-metadata', f'like_count:{metadata["like_count"]}'])
+                
+                # Add formatted duration
+                if metadata.get("duration_formatted"):
+                    cmd.extend(['--parse-metadata', f'duration:{metadata["duration_formatted"]}'])
+                
+                # Add short description
+                if metadata.get("description_short"):
+                    cmd.extend(['--parse-metadata', f'description:{metadata["description_short"]}'])
+                
+                # Add content type and source
+                cmd.extend(['--parse-metadata', 'content_type:Adult Content'])
+                cmd.extend(['--parse-metadata', 'source_site:XVideos'])
+                
+                # Add comments field with additional info
+                comments_parts = []
+                if metadata.get("upload_date_formatted"):
+                    comments_parts.append(f"Uploaded: {metadata['upload_date_formatted']}")
+                if metadata.get("view_count"):
+                    comments_parts.append(f"Views: {metadata['view_count']}")
+                if metadata.get("like_count"):
+                    comments_parts.append(f"Likes: {metadata['like_count']}")
+                if metadata.get("duration_formatted"):
+                    comments_parts.append(f"Duration: {metadata['duration_formatted']}")
+                
+                if comments_parts:
+                    comments = " | ".join(comments_parts)
+                    cmd.extend(['--parse-metadata', f'comments:{comments}'])
         else:
             # Fallback to basic metadata parsing
             cmd.extend([
                 '--parse-metadata', 'title:%(title)s',
                 '--parse-metadata', 'uploader:%(uploader)s',
                 '--parse-metadata', 'channel:%(channel)s',
-                '--parse-metadata', 'upload_date:%(upload_date)s',
             ])
+            # Skip upload_date in fallback mode for adult content compatibility
         
         # Performance and stability options
         cmd.extend([
@@ -436,6 +480,7 @@ class Downloader:
         # Add ffmpeg path if available
         if self._ffmpeg_path:
             cmd.extend(['--ffmpeg-location', self._ffmpeg_path])
+            print(f"[DEBUG] _build_command: Using ffmpeg path: {self._ffmpeg_path}")
         
         # Add URL
         cmd.append(url)
@@ -513,19 +558,20 @@ class Downloader:
                 except json.JSONDecodeError:
                     pass
     
-    def get_video_info(self, url: str) -> Optional[dict]:
+    def get_video_info(self, url: str, mode: str = "youtube") -> Optional[dict]:
         """
         Get video information without downloading.
         
         Args:
-            url: The YouTube URL (should be pre-sanitized)
+            url: The URL (should be pre-sanitized)
+            mode: Either "youtube" or "xvideos" to determine validation rules
             
         Returns:
             Dictionary with video information or None if failed
         """
         try:
-            # URL should already be sanitized, but double-check
-            sanitized_url = sanitize_url(url)
+            # URL should already be sanitized, but double-check with mode
+            sanitized_url = sanitize_url(url, mode)
             
             # Check cache
             cached_metadata = self.metadata_cache.get(sanitized_url)
@@ -537,8 +583,14 @@ class Downloader:
                 '--quiet',
                 '--dump-json',
                 '--no-playlist',
-                sanitized_url
             ]
+            
+            # Add ffmpeg path if available
+            if self._ffmpeg_path:
+                cmd.extend(['--ffmpeg-location', self._ffmpeg_path])
+                print(f"[DEBUG] get_video_info: Using ffmpeg path: {self._ffmpeg_path}")
+            
+            cmd.append(sanitized_url)
             
             result = subprocess.run(
                 cmd,
@@ -583,55 +635,135 @@ class Downloader:
         metadata['description'] = video_info.get('description', '')
         metadata['duration'] = video_info.get('duration', 0)
         
-        # Try to extract artist and album from title
-        title = metadata['title']
-        uploader = metadata['uploader']
+        # Check if this is from an adult content site
+        webpage_url = video_info.get('webpage_url', '')
+        is_adult_content = is_adult_content_site(webpage_url) if webpage_url else False
         
-        # Common patterns for music videos
-        # Pattern: "Artist - Song Title"
-        if ' - ' in title:
-            parts = title.split(' - ', 1)
-            if len(parts) == 2:
-                metadata['artist'] = parts[0].strip()
-                metadata['title'] = parts[1].strip()
-                metadata['album'] = uploader  # Use uploader as album/channel name
-        
-        # Pattern: "Song Title (Artist)"
-        elif ' (' in title and title.endswith(')'):
-            # Extract artist from parentheses
-            start = title.rfind(' (')
-            if start > 0:
-                artist = title[start + 2:-1].strip()
-                song_title = title[:start].strip()
-                metadata['artist'] = artist
-                metadata['title'] = song_title
-                metadata['album'] = uploader
-        
-        # Pattern: "Artist: Song Title"
-        elif ': ' in title:
-            parts = title.split(': ', 1)
-            if len(parts) == 2:
-                metadata['artist'] = parts[0].strip()
-                metadata['title'] = parts[1].strip()
-                metadata['album'] = uploader
-        
+        # Enhanced metadata extraction for XVideos
+        if is_adult_content and 'xvideos.com' in webpage_url:
+            print(f"[DEBUG] XVideos content detected, extracting enhanced metadata")
+            
+            # Extract additional metadata fields
+            metadata['artist'] = metadata['uploader']
+            metadata['album'] = metadata['uploader']
+            
+            # Extract tags/keywords from video info
+            tags = video_info.get('tags', [])
+            if tags:
+                metadata['keywords'] = ', '.join(tags)
+                print(f"[DEBUG] Extracted tags: {metadata['keywords']}")
+            
+            # Extract view count
+            view_count = video_info.get('view_count', 0)
+            if view_count:
+                metadata['view_count'] = str(view_count)
+                print(f"[DEBUG] Extracted view count: {view_count}")
+            
+            # Extract like count
+            like_count = video_info.get('like_count', 0)
+            if like_count:
+                metadata['like_count'] = str(like_count)
+                print(f"[DEBUG] Extracted like count: {like_count}")
+            
+            # Extract categories
+            categories = video_info.get('categories', [])
+            if categories:
+                metadata['genre'] = ', '.join(categories)
+                print(f"[DEBUG] Extracted categories: {metadata['genre']}")
+            
+            # Extract upload date in a more readable format
+            if metadata['upload_date']:
+                try:
+                    # Convert YYYYMMDD to YYYY-MM-DD format
+                    upload_date = metadata['upload_date']
+                    if len(upload_date) == 8:
+                        formatted_date = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:8]}"
+                        metadata['upload_date_formatted'] = formatted_date
+                        print(f"[DEBUG] Formatted upload date: {formatted_date}")
+                except Exception as e:
+                    print(f"[DEBUG] Failed to format upload date: {e}")
+            
+            # Extract video duration in readable format
+            if metadata['duration']:
+                try:
+                    duration_seconds = int(metadata['duration'])
+                    minutes = duration_seconds // 60
+                    seconds = duration_seconds % 60
+                    metadata['duration_formatted'] = f"{minutes}:{seconds:02d}"
+                    print(f"[DEBUG] Formatted duration: {metadata['duration_formatted']}")
+                except Exception as e:
+                    print(f"[DEBUG] Failed to format duration: {e}")
+            
+            # Extract description (first 200 characters)
+            if metadata['description']:
+                desc = metadata['description'].strip()
+                if len(desc) > 200:
+                    desc = desc[:200] + "..."
+                metadata['description_short'] = desc
+                print(f"[DEBUG] Extracted short description: {desc[:50]}...")
+            
+            # Set content type/genre
+            metadata['content_type'] = 'Adult Content'
+            metadata['source_site'] = 'XVideos'
+            
+        elif is_adult_content:
+            # Other adult content sites - basic metadata
+            print(f"[DEBUG] Adult content detected, preserving full title: {metadata['title']}")
+            metadata['artist'] = metadata['uploader']
+            metadata['album'] = metadata['uploader']
+            metadata['content_type'] = 'Adult Content'
+            
         else:
-            # Default: use uploader as artist
-            metadata['artist'] = uploader
-            metadata['album'] = uploader
-        
-        # Try to extract album from description or channel
-        if not metadata.get('album') or metadata['album'] == uploader:
-            # Look for album info in description
-            description = metadata['description'].lower()
-            if 'album:' in description:
-                album_start = description.find('album:') + 6
-                album_end = description.find('\n', album_start)
-                if album_end == -1:
-                    album_end = len(description)
-                album = description[album_start:album_end].strip()
-                if album:
-                    metadata['album'] = album.title()
+            # YouTube and other non-adult content - existing logic
+            # Try to extract artist and album from title (for music videos)
+            title = metadata['title']
+            uploader = metadata['uploader']
+            
+            # Common patterns for music videos
+            # Pattern: "Artist - Song Title"
+            if ' - ' in title:
+                parts = title.split(' - ', 1)
+                if len(parts) == 2:
+                    metadata['artist'] = parts[0].strip()
+                    metadata['title'] = parts[1].strip()
+                    metadata['album'] = uploader  # Use uploader as album/channel name
+            
+            # Pattern: "Song Title (Artist)"
+            elif ' (' in title and title.endswith(')'):
+                # Extract artist from parentheses
+                start = title.rfind(' (')
+                if start > 0:
+                    artist = title[start + 2:-1].strip()
+                    song_title = title[:start].strip()
+                    metadata['artist'] = artist
+                    metadata['title'] = song_title
+                    metadata['album'] = uploader
+            
+            # Pattern: "Artist: Song Title"
+            elif ': ' in title:
+                parts = title.split(': ', 1)
+                if len(parts) == 2:
+                    metadata['artist'] = parts[0].strip()
+                    metadata['title'] = parts[1].strip()
+                    metadata['album'] = uploader
+            
+            else:
+                # Default: use uploader as artist
+                metadata['artist'] = uploader
+                metadata['album'] = uploader
+            
+            # Try to extract album from description or channel
+            if not metadata.get('album') or metadata['album'] == uploader:
+                # Look for album info in description
+                description = metadata['description'].lower()
+                if 'album:' in description:
+                    album_start = description.find('album:') + 6
+                    album_end = description.find('\n', album_start)
+                    if album_end == -1:
+                        album_end = len(description)
+                    album = description[album_start:album_end].strip()
+                    if album:
+                        metadata['album'] = album.title()
         
         return metadata
     

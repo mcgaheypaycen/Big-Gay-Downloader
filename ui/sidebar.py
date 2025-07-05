@@ -3,67 +3,118 @@ Sidebar UI component for YouTube Downloader application.
 Contains link entry, format selection, and add-to-queue functionality.
 """
 
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+import customtkinter as ctk
+from tkinter import filedialog, messagebox, scrolledtext
 from typing import Callable, Optional
 import os
 import subprocess
 import json
+import sys
+from pathlib import Path
+import traceback
+from urllib.parse import urlparse
 
-from core.utils import is_valid_url, probe_playlist, get_playlist_videos, validate_output_permissions, safe_error_message, check_system_resources
+from core.utils import (
+    sanitize_url, is_valid_url, get_playlist_videos, 
+    probe_playlist, validate_output_permissions, 
+    check_system_resources, safe_error_message, _find_yt_dlp,
+    is_adult_content_site
+)
 from core.queue import DownloadJob
 
-# Restore ToggleSwitch class
-class ToggleSwitch(tk.Canvas):
+# CustomTkinter Switch (replaces ToggleSwitch)
+class ModernSwitch(ctk.CTkSwitch):
     """
-    Custom toggle switch widget.
+    Modern switch widget with high-tech styling.
     """
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
-        self.state = tk.BooleanVar(value=False)
-        self.callback = None
-        self.width = 50
-        self.height = 24
-        self.configure(width=self.width, height=self.height, bg='#1B1F24', highlightthickness=0)
-        self._draw_switch()
-        self.bind('<Button-1>', self._toggle)
-    def _draw_switch(self):
-        self.delete("all")
-        bg_color = '#7873F5' if self.state.get() else '#2D3748'
-        self.create_rounded_rectangle(2, 2, self.width-2, self.height-2, fill=bg_color, outline='#4A5568', width=1)
-        circle_x = self.width - 12 if self.state.get() else 12
-        self.create_oval(circle_x-8, 4, circle_x+8, self.height-4, fill='white', outline='#E2E8F0', width=1)
-    def create_rounded_rectangle(self, x1, y1, x2, y2, **kwargs):
-        radius = 10
-        points = [
-            x1+radius, y1,
-            x2-radius, y1,
-            x2, y1,
-            x2, y1+radius,
-            x2, y2-radius,
-            x2, y2,
-            x2-radius, y2,
-            x1+radius, y2,
-            x1, y2,
-            x1, y2-radius,
-            x1, y1+radius,
-            x1, y1
-        ]
-        return self.create_polygon(points, smooth=True, **kwargs)
-    def _toggle(self, event=None):
-        self.state.set(not self.state.get())
-        self._draw_switch()
-        if self.callback:
-            self.callback(self.state.get())
-    def get(self):
-        return self.state.get()
-    def set(self, value):
-        self.state.set(value)
-        self._draw_switch()
-    def set_callback(self, callback):
-        self.callback = callback
+        self.configure(
+            progress_color="#00d4ff",  # Cyan for high-tech feel
+            button_color="#1f2937",
+            button_hover_color="#374151",
+            border_color="#4b5563",
+            fg_color="#111827"
+        )
 
-class SidebarFrame(ttk.Frame):
+class DebugDialog:
+    """Dialog for showing detailed debug information."""
+    
+    def __init__(self, parent, title, error_details, yt_dlp_output=None, yt_dlp_command=None):
+        self.dialog = ctk.CTkToplevel(parent)
+        self.dialog.title(f"Debug Info - {title}")
+        self.dialog.geometry("600x500")
+        self.dialog.resizable(True, True)
+        
+        # Make dialog modal
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+        
+        # Center the dialog
+        self.dialog.update_idletasks()
+        x = (self.dialog.winfo_screenwidth() // 2) - (600 // 2)
+        y = (self.dialog.winfo_screenheight() // 2) - (500 // 2)
+        self.dialog.geometry(f"600x500+{x}+{y}")
+        
+        # Create main frame
+        main_frame = ctk.CTkFrame(self.dialog)
+        main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Title
+        title_label = ctk.CTkLabel(main_frame, text=f"Error Details: {title}", font=("Arial", 12, "bold"))
+        title_label.pack(anchor="w", pady=(0, 10))
+        
+        # Error Details
+        error_frame = ctk.CTkFrame(main_frame)
+        error_frame.pack(fill="both", expand=True, pady=(0, 10))
+        
+        error_text = scrolledtext.ScrolledText(error_frame, wrap="word", height=15)
+        error_text.pack(fill="both", expand=True, padx=5, pady=5)
+        error_text.insert("1.0", error_details)
+        error_text.config(state="disabled")
+        
+        # Buttons
+        button_frame = ctk.CTkFrame(main_frame)
+        button_frame.pack(fill="x", pady=(10, 0))
+        
+        copy_button = ctk.CTkButton(button_frame, text="Copy All to Clipboard", command=self._copy_to_clipboard)
+        copy_button.pack(side="left", padx=(0, 10))
+        
+        close_button = ctk.CTkButton(button_frame, text="Close", command=self.dialog.destroy)
+        close_button.pack(side="right")
+        
+        # Store data for copying
+        self.error_details = error_details
+        self.yt_dlp_output = yt_dlp_output
+        self.yt_dlp_command = yt_dlp_command
+    
+    def _copy_to_clipboard(self):
+        """Copy all debug information to clipboard."""
+        clipboard_text = f"Error Details:\n{self.error_details}\n\n"
+        
+        if self.yt_dlp_command:
+            clipboard_text += f"yt-dlp Command:\n{' '.join(self.yt_dlp_command)}\n\n"
+        
+        if self.yt_dlp_output:
+            clipboard_text += f"yt-dlp Output:\n{self.yt_dlp_output}\n"
+        
+        self.dialog.clipboard_clear()
+        self.dialog.clipboard_append(clipboard_text)
+        
+        # Show confirmation
+        messagebox.showinfo("Copied", "Debug information copied to clipboard!")
+
+def detect_platform(url: str) -> str:
+    parsed = urlparse(url)
+    netloc = parsed.netloc.lower()
+    if any(domain in netloc for domain in ["youtube.com", "youtu.be"]):
+        return "youtube"
+    elif "xvideos.com" in netloc:
+        return "xvideos"
+    else:
+        return "unknown"
+
+class SidebarFrame(ctk.CTkFrame):
     """
     Sidebar frame containing input controls and format selection.
     """
@@ -71,28 +122,31 @@ class SidebarFrame(ttk.Frame):
     def __init__(self, parent, add_job_callback: Callable[[DownloadJob], None], 
                  output_folder: str = "", folder_change_callback: Optional[Callable[[str], None]] = None,
                  add_conversion_job_callback: Optional[Callable[[str, str, str], None]] = None):
-        """
-        Initialize the sidebar frame.
-        
-        Args:
-            parent: Parent widget
-            add_job_callback: Callback function to add a job to the queue
-            output_folder: Default output folder path
-            folder_change_callback: Optional callback when output folder changes
-            add_conversion_job_callback: Optional callback for adding conversion jobs to queue
-        """
-        super().__init__(parent)
-        self.config(width=240)
-        self.add_job_callback = add_job_callback
-        self.folder_change_callback = folder_change_callback
-        self.add_conversion_job_callback = add_conversion_job_callback
-        self.update_callback = None
-        self.output_folder = output_folder or os.path.expanduser("~/Downloads")
-        self.selected_file_path = ""
-        self.config(borderwidth=2, relief="solid", height=600)
-        self.pack_propagate(False)
-        self._create_widgets()
-        self._layout_widgets()
+        try:
+            super().__init__(parent, width=320)  # Increased width for better proportions
+            self.add_job_callback = add_job_callback
+            self.folder_change_callback = folder_change_callback
+            self.add_conversion_job_callback = add_conversion_job_callback
+            self.update_callback = None
+            self.output_folder = output_folder or os.path.expanduser("~/Downloads")
+            self.selected_file_path = ""
+            self.current_mode = "youtube"  # Default to YouTube mode
+            try:
+                self._create_widgets()
+            except Exception as e:
+                print('ERROR: Exception in SidebarFrame._create_widgets')
+                traceback.print_exc()
+                raise
+            try:
+                self._layout_widgets()
+            except Exception as e:
+                print('ERROR: Exception in SidebarFrame._layout_widgets')
+                traceback.print_exc()
+                raise
+        except Exception as e:
+            print('ERROR: Exception in SidebarFrame.__init__')
+            traceback.print_exc()
+            raise
     
     def _add_to_queue(self, format_type):
         print(f"DEBUG: _add_to_queue called with format_type={format_type}")
@@ -101,11 +155,13 @@ class SidebarFrame(ttk.Frame):
         if not url or not output_folder:
             self._show_status("Please enter a valid URL and select an output folder", error=True)
             return
-        
-        if not is_valid_url(url):
-            self._show_status("Invalid URL", error=True)
+        platform = detect_platform(url)
+        if platform not in ("youtube", "xvideos"):
+            self._show_status("Invalid YouTube or XVideos URL", error=True)
             return
-        
+        if not is_valid_url(url, platform):
+            self._show_status("Invalid YouTube or XVideos URL", error=True)
+            return
         if not os.path.exists(output_folder):
             self._show_status("Output folder does not exist", error=True)
             return
@@ -126,10 +182,21 @@ class SidebarFrame(ttk.Frame):
             self._show_status("Checking URL...")
             self.update_idletasks()
             
-            count, playlist_title = probe_playlist(url)
+            count, playlist_title, error_details, yt_dlp_output = probe_playlist(url, platform)
             
             if count == 0:
-                self._show_status("Could not access URL", error=True)
+                # Show debug dialog with detailed error information
+                yt_dlp_command = [_find_yt_dlp(), '--quiet', '--flat-playlist', '--dump-single-json', url]
+                
+                debug_dialog = DebugDialog(
+                    self,
+                    "Could not access URL",
+                    f"URL: {url}\nPlatform: {platform}\n\nError: {error_details or 'Unknown error'}",
+                    yt_dlp_output,
+                    yt_dlp_command
+                )
+                
+                self._show_status("Could not access URL - Check debug dialog", error=True)
                 return
             
             # Ask for confirmation if it's a large playlist
@@ -148,10 +215,21 @@ class SidebarFrame(ttk.Frame):
                     count = 1
             
             # Get individual video information
-            videos = get_playlist_videos(url)
+            videos, video_error, video_output = get_playlist_videos(url, platform)
             
             if not videos:
-                self._show_status("Could not get video information", error=True)
+                # Show debug dialog with detailed error information
+                yt_dlp_command = [_find_yt_dlp(), '--quiet', '--flat-playlist', '--dump-single-json', url]
+                
+                debug_dialog = DebugDialog(
+                    self,
+                    "Could not get video information",
+                    f"URL: {url}\nPlatform: {platform}\n\nError: {video_error or 'Unknown error'}",
+                    video_output,
+                    yt_dlp_command
+                )
+                
+                self._show_status("Could not get video information - Check debug dialog", error=True)
                 return
             
             # Limit to requested count (for "No" option on large playlists)
@@ -160,10 +238,13 @@ class SidebarFrame(ttk.Frame):
             
             # Create and add job(s) for each individual video
             for video in videos:
+                # Use the original URL instead of the extracted URL to avoid CDN URL issues
+                # The downloader will handle extracting the proper webpage_url during download
                 job = DownloadJob(
-                    url=video['url'],
+                    url=url,  # Use original URL, not video['url'] which might be a CDN URL
                     format=format_type,
                     output_folder=output_folder,
+                    mode=platform,
                     compatibility_mode=self.compatibility_toggle.get(),
                     title=video['title']
                 )
@@ -175,96 +256,118 @@ class SidebarFrame(ttk.Frame):
             else:
                 self._show_status(f"Added {len(videos)} videos to queue")
             
-            self.url_entry.delete(0, tk.END)
+            self.url_entry.delete(0, "end")
                 
         except Exception as e:
+            # Show debug dialog for unexpected exceptions
+            error_details = f"Unexpected error: {safe_error_message(e)}\n\nFull error: {str(e)}"
+            debug_dialog = DebugDialog(
+                self,
+                "Unexpected Error",
+                error_details,
+                None,
+                None
+            )
             self._show_status(safe_error_message(e), error=True)
     
     def _create_widgets(self):
         """Create all UI widgets."""
-        # YouTube URL Label and Entry
-        self.url_label = ttk.Label(self, text="YouTube URL:")
-        self.url_entry = ttk.Entry(self, width=40)
-        self.url_entry.configure(foreground='black')
+        # Mode Toggle Section
+        # self.mode_frame = ctk.CTkFrame(self)
+        # self.mode_label = ctk.CTkLabel(self.mode_frame, text="Mode:", font=("Arial", 12, "bold"))
+        # self.youtube_label = ctk.CTkLabel(self.mode_frame, text="YouTube", text_color="#a8a8a8", font=("Segoe UI", 11))
+        # self.mode_toggle = ModernSwitch(self.mode_frame, text=None)
+        # self.mode_toggle.configure(command=self._on_mode_toggle)
+        # self.xvideos_label = ctk.CTkLabel(self.mode_frame, text="XVideos", text_color="#a8a8a8", font=("Segoe UI", 11))
+        
+        # URL Label and Entry (will be updated based on mode)
+        self.url_label = ctk.CTkLabel(self, text="Video URL:", font=("Arial", 12, "bold"))
+        self.url_entry = ctk.CTkEntry(self, width=40, font=("Segoe UI", 11))
         self.url_entry.bind('<Return>', lambda event: self._add_to_queue('mp4'))
 
         # MP4 and MP3 Buttons
-        self.add_mp4_button = ttk.Button(self, text="Add Video", command=lambda: self._add_to_queue('mp4'), style='Sidebar.TButton')
-        self.add_mp4_button.config(takefocus=True)
-        self.add_mp3_button = ttk.Button(self, text="Add Audio", command=lambda: self._add_to_queue('mp3'), style='Sidebar.TButton')
-        self.add_mp3_button.config(takefocus=True)
+        self.add_mp4_button = ctk.CTkButton(self, text="Add Video", command=lambda: self._add_to_queue('mp4'), font=("Segoe UI", 11))
+        self.add_mp3_button = ctk.CTkButton(self, text="Add Audio", command=lambda: self._add_to_queue('mp3'), font=("Segoe UI", 11))
+        
         # Compatibility Mode Toggle Switch (in a horizontal frame)
-        self.compatibility_row = ttk.Frame(self)
-        self.compatibility_label = ttk.Label(self.compatibility_row, text="Compatibility Mode:")
-        self.compatibility_toggle = ToggleSwitch(self.compatibility_row)
+        self.compatibility_row = ctk.CTkFrame(self)
+        self.compatibility_label = ctk.CTkLabel(self.compatibility_row, text="Compatibility Mode:", font=("Segoe UI", 11))
+        self.compatibility_toggle = ModernSwitch(self.compatibility_row, text=None)
+        self.compatibility_toggle.configure(command=self._on_compatibility_toggle)
         
         # Update yt-dlp button
-        self.update_button = ttk.Button(self, text="Update", command=self._update_yt_dlp, style='Sidebar.TButton')
-        self.update_button.config(takefocus=True)
-        self.compatibility_toggle.set_callback(self._on_compatibility_toggle)
+        self.update_button = ctk.CTkButton(self, text="Update yt-dlp", command=self._update_yt_dlp, font=("Segoe UI", 11))
         
         # Separator
-        self.separator1 = ttk.Separator(self, orient='horizontal')
+        self.separator1 = ctk.CTkFrame(self, height=2)
+        self.separator1.configure(fg_color="#2a2b36")
         
         # File Conversion Section
-        self.convert_label = ttk.Label(self, text="Convert:")
-        self.file_path_var = tk.StringVar(value="No file selected")
-        self.file_path_entry = ttk.Entry(self, textvariable=self.file_path_var, width=35, state='readonly')
-        self.file_path_entry.configure(foreground='black')
-        self.select_file_button = ttk.Button(self, text="Browse", command=self._select_file, style='Sidebar.TButton')
-        self.convert_mp4_button = ttk.Button(self, text="Convert Video", command=lambda: self._add_conversion_job('mp4'), style='Sidebar.TButton')
-        self.convert_mp3_button = ttk.Button(self, text="Convert Audio", command=lambda: self._add_conversion_job('mp3'), style='Sidebar.TButton')
+        self.convert_label = ctk.CTkLabel(self, text="Convert Files:", font=("Arial", 12, "bold"))
+        self.file_path_var = ctk.StringVar(value="No file selected")
+        self.file_path_entry = ctk.CTkEntry(self, textvariable=self.file_path_var, width=35, state='readonly', font=("Segoe UI", 11))
+        self.select_file_button = ctk.CTkButton(self, text="Browse Files", command=self._select_file, font=("Segoe UI", 11))
+        self.convert_mp4_button = ctk.CTkButton(self, text="Convert to Video", command=lambda: self._add_conversion_job('mp4'), font=("Segoe UI", 11))
+        self.convert_mp3_button = ctk.CTkButton(self, text="Convert to Audio", command=lambda: self._add_conversion_job('mp3'), font=("Segoe UI", 11))
         
         # Separator
-        self.separator2 = ttk.Separator(self, orient='horizontal')
+        self.separator2 = ctk.CTkFrame(self, height=2)
+        self.separator2.configure(fg_color="#2a2b36")
 
         # Output Folder Label, Entry, and Browse Button
-        self.folder_label = ttk.Label(self, text="Output Folder:")
-        self.folder_var = tk.StringVar(value=self.output_folder)
-        self.folder_entry = ttk.Entry(self, textvariable=self.folder_var, width=35)
-        self.folder_entry.configure(foreground='black')
+        self.folder_label = ctk.CTkLabel(self, text="Output Folder:", font=("Arial", 12, "bold"))
+        self.folder_var = ctk.StringVar(value=self.output_folder)
+        self.folder_entry = ctk.CTkEntry(self, textvariable=self.folder_var, width=35, font=("Segoe UI", 11))
         self.folder_entry.bind('<FocusOut>', self._on_folder_entry_change)
-        self.folder_button = ttk.Button(self, text="Browse", command=self._browse_folder, style='Sidebar.TButton')
+        self.folder_button = ctk.CTkButton(self, text="Browse Folder", command=self._browse_folder, font=("Segoe UI", 11))
 
         # Status Label
-        self.status_label = ttk.Label(self, text="", foreground="#A1A1AA")
-        self.conversion_status_label = ttk.Label(self, text="", foreground="#A1A1AA")
+        self.status_label = ctk.CTkLabel(self, text="", text_color="#a8a8a8", font=("Segoe UI", 10))
+        self.conversion_status_label = ctk.CTkLabel(self, text="", text_color="#a8a8a8", font=("Segoe UI", 10))
     
     def _layout_widgets(self):
         """Layout all widgets in the frame."""
-        # Output folder section (now at the top)
-        self.folder_label.pack(anchor="w", padx=10, pady=(10, 4))
-        self.folder_entry.pack(fill="x", padx=10, pady=(0, 4))
-        self.folder_button.pack(fill="x", padx=10, pady=(0, 12))
+        # Mode toggle section (at the very top)
+        # self.mode_frame.pack(anchor="w", padx=16, pady=(16, 8))
+        # self.mode_label.pack(side="left")
+        # self.youtube_label.pack(side="left", padx=(12, 6))
+        # self.mode_toggle.pack(side="left", padx=(6, 6))
+        # self.xvideos_label.pack(side="left")
+        
+        # Output folder section
+        self.folder_label.pack(anchor="w", padx=16, pady=(16, 6))
+        self.folder_entry.pack(fill="x", padx=16, pady=(0, 6))
+        self.folder_button.pack(fill="x", padx=16, pady=(0, 16))
         
         # Separator
-        self.separator1.pack(fill="x", padx=10, pady=8)
+        self.separator1.pack(fill="x", padx=16, pady=12)
         
-        # YouTube URL section (now below output folder)
-        self.url_label.pack(anchor="w", padx=10, pady=(8, 4))
-        self.url_entry.pack(fill="x", padx=10, pady=(0, 8))
-        self.add_mp4_button.pack(fill="x", padx=10, pady=(0, 4))
-        self.add_mp3_button.pack(fill="x", padx=10, pady=(0, 8))
+        # URL section (now below output folder)
+        self.url_label.pack(anchor="w", padx=16, pady=(12, 6))
+        self.url_entry.pack(fill="x", padx=16, pady=(0, 8))
+        self.add_mp4_button.pack(fill="x", padx=16, pady=(0, 6))
+        self.add_mp3_button.pack(fill="x", padx=16, pady=(0, 12))
+        
         # Compatibility Mode row (label left, toggle right)
-        self.compatibility_row.pack(anchor="w", padx=10, pady=(0, 8))
+        self.compatibility_row.pack(anchor="w", padx=16, pady=(0, 16))
         self.compatibility_label.pack(side="left")
-        self.compatibility_toggle.pack(side="left", padx=(8, 0))
+        self.compatibility_toggle.pack(side="left", padx=(12, 0))
         
         # Separator
-        self.separator2.pack(fill="x", padx=10, pady=8)
+        self.separator2.pack(fill="x", padx=16, pady=12)
         
         # File conversion section (now at the bottom)
-        self.convert_label.pack(anchor="w", padx=10, pady=(8, 4))
-        self.file_path_entry.pack(fill="x", padx=10, pady=(0, 4))
-        self.select_file_button.pack(fill="x", padx=10, pady=(0, 4))
-        self.convert_mp4_button.pack(fill="x", padx=10, pady=(0, 4))
-        self.convert_mp3_button.pack(fill="x", padx=10, pady=(0, 8))
-        self.conversion_status_label.pack(anchor="w", padx=10, pady=(0, 0))
+        self.convert_label.pack(anchor="w", padx=16, pady=(12, 6))
+        self.file_path_entry.pack(fill="x", padx=16, pady=(0, 6))
+        self.select_file_button.pack(fill="x", padx=16, pady=(0, 6))
+        self.convert_mp4_button.pack(fill="x", padx=16, pady=(0, 6))
+        self.convert_mp3_button.pack(fill="x", padx=16, pady=(0, 12))
+        self.conversion_status_label.pack(anchor="w", padx=16, pady=(0, 8))
         
-        self.status_label.pack(anchor="w", padx=10, pady=(0, 0))
+        self.status_label.pack(anchor="w", padx=16, pady=(0, 16))
         
         # Update button at the bottom
-        self.update_button.pack(fill="x", padx=10, pady=(20, 10))
+        self.update_button.pack(fill="x", padx=16, pady=(24, 16))
         
         self.url_entry.focus_set()
     
@@ -296,6 +399,8 @@ class SidebarFrame(ttk.Frame):
             return
         # Prevent converting mp3 to mp4
         if self.selected_file_path.lower().endswith('.mp3') and target_format == 'mp4':
+            print('ERROR: Conversion Error - You cannot convert an audio file to a video file.')
+            traceback.print_exc()
             messagebox.showerror("Conversion Error", "You cannot convert an audio file to a video file.")
             return
         output_folder = self.folder_var.get()
@@ -322,11 +427,13 @@ class SidebarFrame(ttk.Frame):
             self._show_conversion_status("Conversion queue feature not available", error=True)
     
     def _show_conversion_status(self, message: str, error: bool = False):
-        self.conversion_status_label.config(
-            text=message,
-            foreground="#EF4444" if error else "#A1A1AA"
-        )
-        self.after(5000, lambda: self.conversion_status_label.config(text="", foreground="#A1A1AA"))
+        """Show conversion status message with appropriate styling."""
+        if error:
+            self.conversion_status_label.configure(text=message, text_color="#f87171")  # Soft red for errors
+        else:
+            self.conversion_status_label.configure(text=message, text_color="#4ade80")  # Soft green for success
+        # Clear after 5 seconds
+        self.after(5000, lambda: self.conversion_status_label.configure(text="", text_color="#a8a8a8"))
     
     def _browse_folder(self):
         """Open folder browser dialog."""
@@ -364,19 +471,34 @@ class SidebarFrame(ttk.Frame):
         self.update_callback = callback
     
     def _show_status(self, message: str, error: bool = False):
-        """Show status message."""
-        self.status_label.config(
-            text=message,
-            foreground="#EF4444" if error else "#A1A1AA"
-        )
-        # Clear status after 5 seconds
-        self.after(5000, lambda: self.status_label.config(text="", foreground="#A1A1AA"))
+        """Show status message with appropriate styling."""
+        if error:
+            self.status_label.configure(text=message, text_color="#f87171")  # Soft red for errors
+        else:
+            self.status_label.configure(text=message, text_color="#4ade80")  # Soft green for success
+        # Clear after 5 seconds
+        self.after(5000, lambda: self.status_label.configure(text="", text_color="#a8a8a8"))
     
     def set_output_folder(self, folder: str):
-        """Set the output folder."""
+        """Set the output folder and update the entry."""
         self.output_folder = folder
         self.folder_var.set(folder)
     
     def get_output_folder(self) -> str:
         """Get the current output folder."""
-        return self.output_folder 
+        return self.output_folder
+    
+    def _on_mode_toggle(self, value):
+        """Handle mode toggle between YouTube and XVideos."""
+        if value:
+            self.current_mode = "xvideos"
+            self.url_label.config(text="XVideos URL:")
+        else:
+            self.current_mode = "youtube"
+            self.url_label.config(text="YouTube URL:")
+        
+        # Clear the URL entry when switching modes
+        self.url_entry.delete(0, "end")
+        
+        # Show a brief status message
+        self._show_status(f"Switched to {self.current_mode.capitalize()} mode") 

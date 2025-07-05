@@ -1,417 +1,314 @@
 """
-Update dialog for YouTube Downloader application.
-Provides a modal dialog for yt-dlp updates with progress tracking.
+Update dialog component for YouTube Downloader application.
+Handles yt-dlp updates with progress tracking.
 """
 
-import tkinter as tk
-from tkinter import ttk, messagebox
-from typing import Optional, Callable
+import customtkinter as ctk
+from tkinter import messagebox
 import threading
+import subprocess
+import sys
+from pathlib import Path
+import traceback
 
-from core.yt_dlp_installer import InstallerStatus
-from core.version_manager import VersionManager, UpdatePriority
+from core.yt_dlp_installer import YtDlpInstaller, InstallerStatus
+from core.version_manager import VersionManager
 
 
-class UpdateDialog(tk.Toplevel):
+class UpdateDialog:
     """
-    Modal dialog for yt-dlp updates.
+    Dialog for updating yt-dlp with progress tracking.
     """
     
-    def __init__(self, parent, 
-                 current_version: str,
-                 latest_version: str,
-                 update_callback: Callable[[Callable[[InstallerStatus, float, str], None], Callable[[bool, str], None]], None],
-                 release_notes: str = ""):
+    def __init__(self, parent, current_version: str, latest_version: str):
         """
         Initialize the update dialog.
         
         Args:
-            parent: Parent window
+            parent: Parent widget
             current_version: Current yt-dlp version
-            latest_version: Latest available version
-            update_callback: Callback to start the update process
-            release_notes: Release notes for the update
+            latest_version: Latest available yt-dlp version
         """
-        super().__init__(parent)
-        
+        self.parent = parent
         self.current_version = current_version
         self.latest_version = latest_version
-        self.update_callback = update_callback
-        self.release_notes = release_notes
+        self.installer = YtDlpInstaller()
+        self.update_thread = None
+        self.dialog = None
         
-        # Dialog setup
-        self.title("Update yt-dlp")
-        self.geometry("500x400")
-        self.resizable(False, False)
-        self.transient(parent)
-        self.grab_set()
+        self._create_dialog()
+    
+    def _create_dialog(self):
+        """Create the update dialog."""
+        self.dialog = ctk.CTkToplevel(self.parent)
+        self.dialog.title("Update yt-dlp")
+        self.dialog.geometry("500x400")
+        self.dialog.resizable(False, False)
+        
+        # Make dialog modal
+        self.dialog.transient(self.parent)
+        self.dialog.grab_set()
         
         # Center the dialog
-        self.center_on_parent(parent)
+        self.dialog.update_idletasks()
+        x = (self.dialog.winfo_screenwidth() // 2) - (500 // 2)
+        y = (self.dialog.winfo_screenheight() // 2) - (400 // 2)
+        self.dialog.geometry(f"500x400+{x}+{y}")
         
-        # State variables
-        self.is_updating = False
-        self.update_thread = None
-        
-        # Create UI
         self._create_widgets()
         self._layout_widgets()
-        
-        # Focus on the dialog
-        self.focus_set()
-        self.wait_window()
-    
-    def center_on_parent(self, parent):
-        """Center the dialog on its parent window."""
-        self.update_idletasks()
-        
-        parent_x = parent.winfo_rootx()
-        parent_y = parent.winfo_rooty()
-        parent_width = parent.winfo_width()
-        parent_height = parent.winfo_height()
-        
-        dialog_width = 500
-        dialog_height = 400
-        
-        x = parent_x + (parent_width - dialog_width) // 2
-        y = parent_y + (parent_height - dialog_height) // 2
-        
-        self.geometry(f"{dialog_width}x{dialog_height}+{x}+{y}")
     
     def _create_widgets(self):
         """Create all UI widgets."""
         # Main frame
-        self.main_frame = ttk.Frame(self, padding="20")
+        self.main_frame = ctk.CTkFrame(self.dialog)
         
         # Title
-        self.title_label = ttk.Label(
+        self.title_label = ctk.CTkLabel(
             self.main_frame, 
             text="Update yt-dlp",
-            font=("Arial", 16, "bold")
+            font=("Segoe UI", 18, "bold")
         )
         
         # Version information
-        self.version_frame = ttk.LabelFrame(self.main_frame, text="Version Information", padding="10")
+        self.version_frame = ctk.CTkFrame(self.main_frame)
         
-        self.current_version_label = ttk.Label(
+        self.current_version_label = ctk.CTkLabel(
             self.version_frame,
-            text=f"Current Version: {VersionManager.format_version_display(self.current_version)}"
+            text=f"Current Version: {VersionManager.format_version_display(self.current_version)}",
+            font=("Segoe UI", 11)
         )
         
-        self.latest_version_label = ttk.Label(
+        self.latest_version_label = ctk.CTkLabel(
             self.version_frame,
-            text=f"Latest Version: {VersionManager.format_version_display(self.latest_version)}"
+            text=f"Latest Version: {VersionManager.format_version_display(self.latest_version)}",
+            font=("Segoe UI", 11)
         )
         
-        # Update description
-        self.description_label = ttk.Label(
-            self.main_frame,
-            text=VersionManager.get_update_description(self.current_version, self.latest_version),
-            wraplength=450,
-            justify="left"
-        )
+        # Progress section
+        self.progress_frame = ctk.CTkFrame(self.main_frame)
         
-        # Release notes (if available)
-        if self.release_notes:
-            self.notes_frame = ttk.LabelFrame(self.main_frame, text="Release Notes", padding="10")
-            self.notes_text = tk.Text(
-                self.notes_frame,
-                height=6,
-                width=60,
-                wrap="word",
-                state="disabled"
-            )
-            self.notes_scrollbar = ttk.Scrollbar(self.notes_frame, orient="vertical", command=self.notes_text.yview)
-            self.notes_text.configure(yscrollcommand=self.notes_scrollbar.set)
-            
-            # Insert release notes
-            self.notes_text.config(state="normal")
-            self.notes_text.insert("1.0", self.release_notes)
-            self.notes_text.config(state="disabled")
-        
-        # Progress frame (initially hidden)
-        self.progress_frame = ttk.LabelFrame(self.main_frame, text="Update Progress", padding="10")
-        
-        self.progress_label = ttk.Label(self.progress_frame, text="Preparing update...")
-        self.progress_bar = ttk.Progressbar(
+        self.progress_label = ctk.CTkLabel(
             self.progress_frame,
-            mode="determinate",
-            length=400
+            text="Ready to update",
+            font=("Segoe UI", 11)
         )
-        self.progress_percent = ttk.Label(self.progress_frame, text="0%")
+        
+        self.progress_bar = ctk.CTkProgressBar(self.progress_frame)
+        self.progress_bar.set(0)
         
         # Buttons
-        self.button_frame = ttk.Frame(self.main_frame)
+        self.button_frame = ctk.CTkFrame(self.main_frame)
         
-        self.update_button = ttk.Button(
+        self.update_button = ctk.CTkButton(
             self.button_frame,
             text="Update Now",
             command=self._start_update,
-            style="Accent.TButton"
+            font=("Segoe UI", 11)
         )
         
-        self.close_button = ttk.Button(
+        self.cancel_button = ctk.CTkButton(
             self.button_frame,
-            text="Close",
-            command=self.destroy,
-            style="Sidebar.TButton"
+            text="Cancel",
+            command=self._on_cancel_click,
+            font=("Segoe UI", 11)
         )
     
     def _layout_widgets(self):
         """Layout all widgets."""
-        self.main_frame.pack(fill="both", expand=True)
+        self.main_frame.pack(fill="both", expand=True, padx=20, pady=20)
         
         # Title
         self.title_label.pack(pady=(0, 20))
         
         # Version information
-        self.version_frame.pack(fill="x", pady=(0, 15))
-        self.current_version_label.pack(anchor="w")
-        self.latest_version_label.pack(anchor="w")
+        self.version_frame.pack(fill="x", pady=(0, 20))
+        self.current_version_label.pack(anchor="w", padx=10, pady=5)
+        self.latest_version_label.pack(anchor="w", padx=10, pady=5)
         
-        # Description
-        self.description_label.pack(fill="x", pady=(0, 15))
-        
-        # Release notes
-        if hasattr(self, 'notes_frame'):
-            self.notes_frame.pack(fill="both", expand=True, pady=(0, 15))
-            self.notes_text.pack(side="left", fill="both", expand=True)
-            self.notes_scrollbar.pack(side="right", fill="y")
-        
-        # Progress frame (initially hidden)
-        self.progress_frame.pack(fill="x", pady=(0, 15))
-        self.progress_label.pack(anchor="w", pady=(0, 5))
-        self.progress_bar.pack(fill="x", pady=(0, 5))
-        self.progress_percent.pack(anchor="w")
-        self.progress_frame.pack_forget()  # Hide initially
+        # Progress section
+        self.progress_frame.pack(fill="x", pady=(0, 20))
+        self.progress_label.pack(anchor="w", padx=10, pady=5)
+        self.progress_bar.pack(fill="x", padx=10, pady=5)
         
         # Buttons
-        self.button_frame.pack(fill="x", pady=(20, 0))
-        self.update_button.pack(side="right", padx=(5, 0))
-        self.close_button.pack(side="right")
-        
-        # Add hover effect to the 'Close' button to match sidebar
-        def on_close_enter(e):
-            self.close_button.configure(style="Sidebar.TButton")
-        def on_close_leave(e):
-            self.close_button.configure(style="Sidebar.TButton")
-        self.close_button.bind("<Enter>", on_close_enter)
-        self.close_button.bind("<Leave>", on_close_leave)
+        self.button_frame.pack(fill="x", pady=(0, 10))
+        self.update_button.pack(side="left", padx=(0, 10))
+        self.cancel_button.pack(side="right")
     
     def _start_update(self):
         """Start the update process."""
-        if self.is_updating:
+        if not self.dialog:
             return
+            
+        self.update_button.configure(state="disabled")
+        self.cancel_button.configure(state="disabled")
         
-        # Confirm update
-        priority = VersionManager.determine_update_priority(self.current_version, self.latest_version)
-        
-        if priority in [UpdatePriority.HIGH, UpdatePriority.CRITICAL]:
-            message = f"This is a {priority.value} priority update. Continue?"
-        else:
-            message = "Start the update process?"
-        
-        if not messagebox.askyesno("Confirm Update", message):
+        # Start update in background thread
+        self.update_thread = threading.Thread(target=self._update_yt_dlp, daemon=True)
+        self.update_thread.start()
+    
+    def _update_yt_dlp(self):
+        """Update yt-dlp in background thread."""
+        if not self.dialog:
             return
-        
-        # Show progress frame
-        self.progress_frame.pack(fill="x", pady=(0, 15))
-        
-        # Hide buttons except cancel
-        self.update_button.pack_forget()
-        self.close_button.pack_forget()
-        
-        # Start update
-        self.is_updating = True
-        self.update_callback(
-            self._progress_callback,
-            self._completion_callback
-        )
+            
+        try:
+            # Update progress
+            self.dialog.after(0, lambda: self._update_progress("Downloading yt-dlp...", 0.2))
+            
+            # Download and install
+            result = self.installer.install_yt_dlp()
+            
+            if result:
+                self.dialog.after(0, lambda: self._update_progress("Update completed successfully!", 1.0))
+                self.dialog.after(1000, self._on_update_success)
+            else:
+                print('ERROR: Failed to update yt-dlp')
+                traceback.print_exc()
+                error_msg = "Failed to update yt-dlp"
+                self.dialog.after(0, lambda: self._update_progress(error_msg, 0.0))
+                self.dialog.after(1000, lambda: self._on_update_failure(error_msg))
+                
+        except Exception as e:
+            print('ERROR: Update failed')
+            traceback.print_exc()
+            error_msg = f"Update failed: {str(e)}"
+            self.dialog.after(0, lambda: self._update_progress(error_msg, 0.0))
+            self.dialog.after(1000, lambda: self._on_update_failure(error_msg))
     
-    def _progress_callback(self, status: InstallerStatus, progress: float, message: str):
-        """Handle progress updates from the installer."""
-        if not self.is_updating:
+    def _update_progress(self, message: str, progress: float):
+        """Update progress display."""
+        if not self.dialog:
             return
-        
-        # Update UI in main thread
-        self.after(0, self._update_progress, status, progress, message)
+        self.progress_label.configure(text=message)
+        self.progress_bar.set(progress)
     
-    def _update_progress(self, status: InstallerStatus, progress: float, message: str):
-        """Update progress display (called in main thread)."""
-        if not self.is_updating:
-            return
-        
-        # Update progress bar
-        self.progress_bar["value"] = progress
-        self.progress_percent["text"] = f"{progress:.1f}%"
-        
-        # Update status message
-        status_text = f"{status.value.title()}: {message}"
-        self.progress_label["text"] = status_text
-        
-        # Update window title
-        self.title(f"Update yt-dlp - {progress:.1f}%")
+    def _on_update_success(self):
+        """Handle successful update."""
+        messagebox.showinfo("Update Complete", "yt-dlp has been updated successfully!")
+        if self.dialog:
+            self.dialog.destroy()
     
-    def _completion_callback(self, success: bool, message: str):
-        """Handle completion of the update process."""
-        self.is_updating = False
-        
-        # Update UI in main thread
-        self.after(0, self._handle_completion, success, message)
+    def _on_update_failure(self, error_msg: str):
+        """Handle update failure."""
+        print('ERROR: Update Failed')
+        traceback.print_exc()
+        messagebox.showerror("Update Failed", error_msg)
+        if self.dialog:
+            self.update_button.configure(state="normal")
+            self.cancel_button.configure(state="normal")
     
-    def _handle_completion(self, success: bool, message: str):
-        """Handle completion (called in main thread)."""
-        if success:
-            # Show success message
-            messagebox.showinfo("Update Complete", f"yt-dlp has been updated successfully!\n\n{message}")
-            
-            # Update version display
-            self.current_version_label["text"] = f"Current Version: {VersionManager.format_version_display(self.latest_version)}"
-            self.description_label["text"] = "yt-dlp is up to date."
-            
-            # Show close button
-            self.close_button.pack(side="right")
-            
-            # Hide progress frame
-            self.progress_frame.pack_forget()
-            
-        else:
-            # Show error message
-            messagebox.showerror("Update Failed", f"Failed to update yt-dlp:\n\n{message}")
-            
-            # Restore buttons
-            self.update_button.pack(side="right", padx=(5, 0))
-            self.close_button.pack(side="right")
-            
-            # Hide progress frame
-            self.progress_frame.pack_forget()
+    def _on_cancel_click(self):
+        """Handle cancel button click."""
+        if self.dialog:
+            self.dialog.destroy()
 
 
-class UpdateNotificationDialog(tk.Toplevel):
+class UpdateNotificationDialog:
     """
     Simple notification dialog for available updates.
     """
     
-    def __init__(self, parent, 
-                 current_version: str,
-                 latest_version: str,
-                 update_callback: Callable[[Callable[[InstallerStatus, float, str], None], Callable[[bool, str], None]], None]):
+    def __init__(self, parent, current_version: str, latest_version: str, update_callback):
         """
         Initialize the update notification dialog.
         
         Args:
-            parent: Parent window
+            parent: Parent widget
             current_version: Current yt-dlp version
-            latest_version: Latest available version
-            update_callback: Callback to start the update process
+            latest_version: Latest available yt-dlp version
+            update_callback: Callback function to start update
         """
-        super().__init__(parent)
-        
+        self.parent = parent
         self.current_version = current_version
         self.latest_version = latest_version
         self.update_callback = update_callback
+        self.dialog = None
         
-        # Dialog setup
-        self.title("Update")
-        self.geometry("400x200")
-        self.resizable(False, False)
-        self.transient(parent)
-        self.grab_set()
+        self._create_dialog()
+    
+    def _create_dialog(self):
+        """Create the notification dialog."""
+        self.dialog = ctk.CTkToplevel(self.parent)
+        self.dialog.title("Update Available")
+        self.dialog.geometry("400x250")
+        self.dialog.resizable(False, False)
+        
+        # Make dialog modal
+        self.dialog.transient(self.parent)
+        self.dialog.grab_set()
         
         # Center the dialog
-        self.center_on_parent(parent)
+        self.dialog.update_idletasks()
+        x = (self.dialog.winfo_screenwidth() // 2) - (400 // 2)
+        y = (self.dialog.winfo_screenheight() // 2) - (250 // 2)
+        self.dialog.geometry(f"400x250+{x}+{y}")
         
-        # Create UI
         self._create_widgets()
         self._layout_widgets()
-        
-        # Focus on the dialog
-        self.focus_set()
-        self.wait_window()
-    
-    def center_on_parent(self, parent):
-        """Center the dialog on its parent window."""
-        self.update_idletasks()
-        
-        parent_x = parent.winfo_rootx()
-        parent_y = parent.winfo_rooty()
-        parent_width = parent.winfo_width()
-        parent_height = parent.winfo_height()
-        
-        dialog_width = 400
-        dialog_height = 200
-        
-        x = parent_x + (parent_width - dialog_width) // 2
-        y = parent_y + (parent_height - dialog_height) // 2
-        
-        self.geometry(f"{dialog_width}x{dialog_height}+{x}+{y}")
     
     def _create_widgets(self):
         """Create all UI widgets."""
         # Main frame
-        self.main_frame = ttk.Frame(self, padding="20")
+        self.main_frame = ctk.CTkFrame(self.dialog)
         
         # Icon and title
-        self.title_label = ttk.Label(
+        self.title_label = ctk.CTkLabel(
             self.main_frame,
             text="🔄 Update Available",
-            font=("Arial", 14, "bold")
+            font=("Segoe UI", 16, "bold")
         )
         
         # Message
-        self.message_label = ttk.Label(
+        self.message_label = ctk.CTkLabel(
             self.main_frame,
             text=f"A new version of yt-dlp is available:\n{self.current_version} → {self.latest_version}",
             wraplength=350,
-            justify="center"
+            justify="center",
+            font=("Segoe UI", 11)
         )
         
         # Buttons
-        self.button_frame = ttk.Frame(self.main_frame)
+        self.button_frame = ctk.CTkFrame(self.main_frame)
         
-        self.update_button = ttk.Button(
+        self.update_button = ctk.CTkButton(
             self.button_frame,
             text="Update Now",
-            command=self._open_update_dialog,
-            style="Accent.TButton"
+            command=self._on_update_click,
+            font=("Segoe UI", 11)
         )
         
-        self.later_button = ttk.Button(
+        self.later_button = ctk.CTkButton(
             self.button_frame,
             text="Later",
-            command=self.destroy,
-            style="Sidebar.TButton"
+            command=self._on_later_click,
+            font=("Segoe UI", 11)
         )
     
     def _layout_widgets(self):
         """Layout all widgets."""
-        self.main_frame.pack(fill="both", expand=True)
+        self.main_frame.pack(fill="both", expand=True, padx=20, pady=20)
         
         # Title
-        self.title_label.pack(pady=(0, 15))
+        self.title_label.pack(pady=(0, 20))
         
         # Message
-        self.message_label.pack(fill="x", pady=(0, 20))
+        self.message_label.pack(pady=(0, 30))
         
         # Buttons
         self.button_frame.pack(fill="x")
-        self.update_button.pack(side="right", padx=(5, 0))
+        self.update_button.pack(side="left", padx=(0, 10))
         self.later_button.pack(side="right")
-        
-        # Add hover effect to the 'Later' button to match sidebar
-        def on_later_enter(e):
-            self.later_button.configure(style="Sidebar.TButton")
-        def on_later_leave(e):
-            self.later_button.configure(style="Sidebar.TButton")
-        self.later_button.bind("<Enter>", on_later_enter)
-        self.later_button.bind("<Leave>", on_later_leave)
     
-    def _open_update_dialog(self):
-        """Open the full update dialog."""
-        self.destroy()
-        UpdateDialog(
-            self.master,
-            self.current_version,
-            self.latest_version,
-            self.update_callback
-        ) 
+    def _on_update_click(self):
+        """Handle update button click."""
+        if self.dialog:
+            self.dialog.destroy()
+        if self.update_callback:
+            self.update_callback()
+    
+    def _on_later_click(self):
+        """Handle later button click."""
+        if self.dialog:
+            self.dialog.destroy() 

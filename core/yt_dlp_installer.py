@@ -53,7 +53,7 @@ class YtDlpInstaller:
         """
         if app_data_dir is None:
             # Default to user's home directory
-            self.app_data_dir = Path.home() / ".big_gay_yt_ripper"
+            self.app_data_dir = Path.home() / ".big_gay_downloader"
         else:
             self.app_data_dir = Path(app_data_dir)
         

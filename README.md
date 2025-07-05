@@ -1,4 +1,15 @@
-# Big Gay YT Ripper 🏳️‍🌈
+# Big Gay Downloader 🏳️‍🌈
+
+## 🚨 Recent Updates (2024-06)
+
+- **Full UI Redesign**: The entire interface was redesigned for a modern, classy, and cozy look, with improved spacing, color palette, and usability.
+- **CustomTkinter Migration**: The app now uses [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) for a high-tech, modern widget set and better dark mode support.
+- **No More Mode Toggle**: Users can now paste either YouTube or XVideos links directly—no need to switch modes. The app auto-detects the platform and processes accordingly.
+- **Automatic Platform Detection**: The backend now detects whether a link is YouTube or XVideos and validates/handles it appropriately.
+- **Improved .gitignore**: The repository now excludes build artifacts, binaries, and cache files for a clean, professional codebase.
+- **README & Documentation**: This README and project documentation have been updated to reflect all new features and best practices.
+
+---
 
 A modern, feature-rich YouTube downloader and media converter with a GUI built in Python and Tkinter.
 
@@ -41,6 +52,7 @@ A modern, feature-rich YouTube downloader and media converter with a GUI built i
 ```
 yt-dlp>=2023.12.30    # YouTube downloading
 psutil>=5.9.0         # System resource monitoring
+customtkinter>=5.2.0  # Modern Tkinter widgets
 ```
 
 ### Build Dependencies (for developers)
@@ -54,27 +66,24 @@ pytest>=7.0.0        # Testing
 ## 🚀 Installation
 
 ### Option 1: Download Executable (Recommended)
-1. Go to [Releases](https://github.com/yourusername/big-gay-yt-ripper/releases)
-2. Download the latest `Big Gay YT Ripper.exe`
+1. Go to [Releases](https://github.com/mcgaheypaycen/Big_Gay_YT_Ripper/releases)
+2. Download the latest `Big Gay Downloader.exe`
 3. Run the executable - no installation required!
 
 ### Option 2: Run from Source
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/yourusername/big-gay-yt-ripper.git
-   cd big-gay-yt-ripper
+   git clone https://github.com/mcgaheypaycen/Big_Gay_YT_Ripper.git
+   cd Big_Gay_YT_Ripper
    ```
-
 2. **Install Python dependencies**:
    ```bash
    pip install -r requirements.txt
    ```
-
 3. **Download FFmpeg**:
    - Download from [FFmpeg Official Site](https://ffmpeg.org/download.html)
    - Extract `ffmpeg.exe` to `assets/ffmpeg/` folder
    - Or use the provided download script (see below)
-
 4. **Run the application**:
    ```bash
    python main.py
@@ -117,8 +126,8 @@ big-gay-yt-ripper/
 3. **FFmpeg Setup**: Ensure `ffmpeg.exe` is in `assets/ffmpeg/` folder
 4. **Configure Output Folder**: Set your preferred download location
 
-### Downloading YouTube Videos
-1. **Enter URL**: Paste a YouTube URL in the sidebar
+### Downloading YouTube or XVideos
+1. **Enter URL**: Paste a YouTube or XVideos URL in the sidebar
 2. **Select Format**: Choose MP4 (video) or MP3 (audio)
 3. **Start Downloads**: Click "Start Downloads" to begin
 4. **Monitor Progress**: Watch real-time progress in the queue
@@ -145,7 +154,7 @@ big-gay-yt-ripper/
 ### yt-dlp Updates
 - Automatic background update checks
 - Manual updates via "Update yt-dlp" button
-- Installed to: `%USERPROFILE%\.big_gay_yt_ripper\yt-dlp\`
+- Installed to: `%USERPROFILE%\.big_gay_downloader\yt-dlp\`
 
 ### FFmpeg Integration
 - Required for media conversion
@@ -157,21 +166,19 @@ big-gay-yt-ripper/
 ### Setting Up Development Environment
 1. **Clone and setup**:
    ```bash
-   git clone https://github.com/yourusername/big-gay-yt-ripper.git
-   cd big-gay-yt-ripper
+   git clone https://github.com/mcgaheypaycen/Big_Gay_YT_Ripper.git
+   cd Big_Gay_YT_Ripper
    python -m venv venv
    venv\Scripts\activate  # Windows
    pip install -r requirements.txt
    pip install -r requirements_build.txt
    ```
-
 2. **Download FFmpeg**:
    ```bash
    # Create assets/ffmpeg directory
    mkdir -p assets/ffmpeg
    # Download ffmpeg.exe to assets/ffmpeg/
    ```
-
 3. **Run tests**:
    ```bash
    pytest test_basic.py
@@ -207,7 +214,7 @@ pyinstaller --onefile --noconsole --icon=assets/icon.ico main.py
 
 **"Download failed"**
 - Check internet connection
-- Verify YouTube URL is valid
+- Verify YouTube or XVideos URL is valid
 - Try updating yt-dlp via sidebar button
 
 ### Debug Mode
@@ -238,14 +245,15 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📞 Support
 
-- **Issues**: [GitHub Issues](https://github.com/mcgaheypaycen/big-gay-yt-ripper/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/mcgaheypaycen/big-gay-yt-ripper/discussions)
-- **Wiki**: [Project Wiki](https://github.com/mcgaheypaycen/big-gay-yt-ripper/wiki)
+- **Issues**: [GitHub Issues](https://github.com/mcgaheypaycen/Big_Gay_YT_Ripper/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/mcgaheypaycen/Big_Gay_YT_Ripper/discussions)
+- **Wiki**: [Project Wiki](https://github.com/mcgaheypaycen/Big_Gay_YT_Ripper/wiki)
 
 ## 🙏 Acknowledgments
 
 - **yt-dlp**: YouTube downloading engine
 - **FFmpeg**: Media conversion capabilities
+- **CustomTkinter**: Modern Tkinter widgets
 - **Tkinter**: GUI framework
 - **Open source community**: For inspiration and support
 

@@ -25,6 +25,7 @@ class DownloadJob:
     url: str
     format: str  # 'mp4' or 'mp3'
     output_folder: str
+    mode: str = "youtube"  # 'youtube' or 'xvideos'
     compatibility_mode: bool = False
     status: JobStatus = JobStatus.PENDING
     progress: float = 0.0

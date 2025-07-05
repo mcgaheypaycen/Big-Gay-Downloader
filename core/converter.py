@@ -10,7 +10,7 @@ import threading
 from typing import Optional, Callable
 from pathlib import Path
 
-from core.utils import sanitize_filename
+from core.utils import sanitize_filename, find_ffmpeg
 
 
 class ConversionError(Exception):
@@ -41,18 +41,11 @@ class FileConverter:
         print(f"[DEBUG] FileConverter: Detected ffmpeg path: {self._ffmpeg_path}")
     
     def _find_ffmpeg(self) -> Optional[str]:
-        """Find ffmpeg executable, always prefer bundled version for packaging."""
-        # PyInstaller sets sys._MEIPASS to the temp folder where it extracts files
-        if hasattr(sys, '_MEIPASS'):  # type: ignore
-            base_path = Path(sys._MEIPASS)  # type: ignore
-        else:
-            base_path = Path(__file__).parent.parent
-        ffmpeg_path = base_path / 'assets' / 'ffmpeg' / ('ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg')
-        print(f"[DEBUG] FileConverter: Looking for bundled ffmpeg at: {ffmpeg_path}")
-        if ffmpeg_path.exists():
-            return str(ffmpeg_path)
-        # Fallback: try system ffmpeg
-        return 'ffmpeg'
+        """Find ffmpeg executable, prefer bundled version for packaging."""
+        ffmpeg_path = find_ffmpeg()
+        if ffmpeg_path != 'ffmpeg' and os.path.exists(ffmpeg_path):
+            return ffmpeg_path
+        return None
     
     def convert_file(self, input_path: str, target_format: str, output_folder: str, 
                     progress_callback: Optional[Callable[[float], None]] = None,

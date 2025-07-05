@@ -35,7 +35,7 @@ class FirstLaunchManager:
             app_data_dir: Directory to store configuration and yt-dlp
         """
         if app_data_dir is None:
-            self.app_data_dir = Path.home() / ".big_gay_yt_ripper"
+            self.app_data_dir = Path.home() / ".big_gay_downloader"
         else:
             self.app_data_dir = Path(app_data_dir)
         

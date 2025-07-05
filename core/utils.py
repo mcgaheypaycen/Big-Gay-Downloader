@@ -7,43 +7,64 @@ import re
 import subprocess
 import json
 import sys
+import os
 from typing import Tuple, Optional
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
 
 
+def resource_path(relative_path: str) -> str:
+    """
+    Get absolute path to resource, works for dev and for PyInstaller onefile.
+    """
+    if hasattr(sys, '_MEIPASS'):  # type: ignore[attr-defined]
+        return os.path.join(sys._MEIPASS, relative_path)  # type: ignore[attr-defined]
+    return os.path.join(os.path.abspath("."), relative_path)
+
+
+def find_ffmpeg() -> str:
+    """
+    Find ffmpeg executable, prefer bundled version for packaging.
+    Returns the path to ffmpeg or 'ffmpeg' as fallback.
+    """
+    # Try bundled ffmpeg first
+    ffmpeg_path = resource_path('assets/ffmpeg/ffmpeg.exe')
+    if os.path.exists(ffmpeg_path):
+        return ffmpeg_path
+    
+    # Fallback to system ffmpeg
+    return 'ffmpeg'
+
+
 def _find_yt_dlp() -> str:
-    """Find yt-dlp executable, prefer app data and bundled version for packaging."""
+    """Find yt-dlp executable, prefer app data and never use PyInstaller temp path."""
     from core.first_launch import FirstLaunchManager
 
-    # 1. PyInstaller bundled
-    if hasattr(sys, '_MEIPASS'):
-        bundled_path = Path(sys._MEIPASS) / ('yt-dlp.exe' if sys.platform == 'win32' else 'yt-dlp')
-        if bundled_path.exists():
-            return str(bundled_path)
-
-    # 2. App data directory
+    # 1. App data directory (preferred)
     manager = FirstLaunchManager()
     installed_path = manager.installer.get_yt_dlp_path()
     if installed_path and installed_path != 'yt-dlp':
-        return installed_path
+        # Never use a path from a temp directory (PyInstaller _MEI)
+        if '_MEI' not in installed_path:
+            return installed_path
 
-    # 3. Root directory (next to main.py)
+    # 2. Root directory (next to main.py)
     base_path = Path(__file__).parent.parent
     yt_dlp_path = base_path / ('yt-dlp.exe' if sys.platform == 'win32' else 'yt-dlp')
     if yt_dlp_path.exists():
         return str(yt_dlp_path)
 
-    # 4. Fallback: system PATH
+    # 3. Fallback: system PATH
     return 'yt-dlp'
 
 
-def sanitize_url(url: str) -> str:
+def sanitize_url(url: str, mode: str = "youtube") -> str:
     """
     Sanitize and validate a URL to prevent command injection and ensure proper structure.
     
     Args:
         url: The URL to sanitize
+        mode: Either "youtube" or "xvideos" to determine validation rules
         
     Returns:
         Sanitized URL string
@@ -51,21 +72,14 @@ def sanitize_url(url: str) -> str:
     Raises:
         ValueError: If URL is invalid or contains dangerous patterns
     """
-    def log_debug(msg):
-        with open('sanitize_url_debug.log', 'a', encoding='utf-8') as f:
-            f.write(msg + '\n')
-
     if not url or not isinstance(url, str):
-        log_debug(f"[DEBUG] sanitize_url: url is not a non-empty string: {repr(url)}")
         raise ValueError("URL must be a non-empty string")
     
     # Remove leading/trailing whitespace
     url = url.strip()
-    log_debug(f"[DEBUG] sanitize_url: validating url: {repr(url)}")
     
     # Check length limits
     if len(url) > 2048:
-        log_debug(f"[DEBUG] sanitize_url: url too long: {len(url)}")
         raise ValueError("URL is too long (maximum 2048 characters)")
     
     # Check for command injection patterns
@@ -75,78 +89,94 @@ def sanitize_url(url: str) -> str:
     ]
     for pattern in dangerous_patterns:
         if pattern in url:
-            log_debug(f"[DEBUG] sanitize_url: url contains dangerous pattern: {pattern}")
             raise ValueError(f"URL contains dangerous pattern: {pattern}")
     
     # Basic URL format validation
     try:
         parsed = urlparse(url)
-        log_debug(f"[DEBUG] sanitize_url: parsed.scheme={parsed.scheme}, parsed.netloc={parsed.netloc}, parsed.path={parsed.path}, parsed.query={parsed.query}")
         if not parsed.scheme or not parsed.netloc:
-            log_debug(f"[DEBUG] sanitize_url: missing scheme or netloc")
             raise ValueError("Invalid URL format")
     except Exception as e:
-        log_debug(f"[DEBUG] sanitize_url: exception in urlparse: {e}")
         raise ValueError(f"Invalid URL format: {e}")
     
-    # Check for YouTube domains
-    youtube_domains = [
-        'youtube.com',
-        'www.youtube.com',
-        'm.youtube.com',
-        'youtu.be',
-        'www.youtu.be'
-    ]
-    if parsed.netloc.lower() not in youtube_domains:
-        log_debug(f"[DEBUG] sanitize_url: netloc not in youtube_domains: {parsed.netloc.lower()}")
-        raise ValueError("URL must be from a valid YouTube domain")
+    # Validate based on mode
+    if mode == "youtube":
+        # Check for YouTube domains
+        youtube_domains = [
+            'youtube.com',
+            'www.youtube.com',
+            'm.youtube.com',
+            'youtu.be',
+            'www.youtu.be'
+        ]
+        if parsed.netloc.lower() not in youtube_domains:
+            raise ValueError("URL must be from a valid YouTube domain")
+        
+        # Relaxed: For youtube.com, accept any path as long as 'v' or 'list' is present
+        if 'youtube.com' in parsed.netloc.lower():
+            query_params = parse_qs(parsed.query)
+            if not ("v" in query_params or "list" in query_params):
+                raise ValueError("YouTube URL must contain video ID or playlist ID")
+        
+        elif 'youtu.be' in parsed.netloc.lower():
+            if not parsed.path or len(parsed.path) < 2:
+                raise ValueError("Invalid youtu.be URL format")
     
-    # Relaxed: For youtube.com, accept any path as long as 'v' or 'list' is present
-    if 'youtube.com' in parsed.netloc.lower():
-        query_params = parse_qs(parsed.query)
-        log_debug(f"[DEBUG] sanitize_url: query_params={query_params}")
-        if not ("v" in query_params or "list" in query_params):
-            log_debug(f"[DEBUG] sanitize_url: missing 'v' or 'list' in query_params")
-            raise ValueError("YouTube URL must contain video ID or playlist ID")
-    
-    elif 'youtu.be' in parsed.netloc.lower():
+    elif mode == "xvideos":
+        # Check for XVideos domains
+        xvideos_domains = [
+            'xvideos.com',
+            'www.xvideos.com',
+            'm.xvideos.com'
+        ]
+        if parsed.netloc.lower() not in xvideos_domains:
+            raise ValueError("URL must be from a valid XVideos domain")
+        
+        # XVideos URLs typically have paths like /video12345/title
+        # Or CDN URLs with specific patterns
         if not parsed.path or len(parsed.path) < 2:
-            log_debug(f"[DEBUG] sanitize_url: invalid youtu.be path: {parsed.path}")
-            raise ValueError("Invalid youtu.be URL format")
+            raise ValueError("Invalid XVideos URL format")
     
-    log_debug(f"[DEBUG] sanitize_url: url is valid!")
+    else:
+        raise ValueError(f"Invalid mode: {mode}. Must be 'youtube' or 'xvideos'")
+    
     return url
 
 
-def is_valid_url(url: str) -> bool:
+def is_valid_url(url: str, mode: str = "youtube") -> bool:
     """
-    Validate if the given URL is a valid YouTube URL.
+    Validate if the given URL is a valid URL for the specified mode.
     
     Args:
         url: The URL to validate
+        mode: Either "youtube" or "xvideos" to determine validation rules
         
     Returns:
-        True if valid YouTube URL, False otherwise
+        True if valid URL for the specified mode, False otherwise
     """
     try:
-        sanitize_url(url)
+        sanitize_url(url, mode)
         return True
     except ValueError:
         return False
 
 
-def get_playlist_videos(url: str) -> list:
+def get_playlist_videos(url: str, mode: str = "youtube") -> Tuple[list, Optional[str], Optional[str]]:
     """
     Get individual video information from a playlist.
     
     Args:
-        url: The YouTube playlist URL
+        url: The playlist URL
+        mode: Either "youtube" or "xvideos" to determine validation rules
         
     Returns:
-        List of dictionaries with 'url' and 'title' keys for each video
+        Tuple of (videos_list, error_details, yt_dlp_output)
+        - videos_list: List of dictionaries with 'url' and 'title' keys for each video
+        - error_details: Detailed error information if failed
+        - yt_dlp_output: Raw yt-dlp output (stdout + stderr)
     """
-    if not is_valid_url(url):
-        return []
+    if not is_valid_url(url, mode):
+        return [], "Invalid URL format", None
     
     try:
         # Use bundled yt-dlp to get playlist information with individual video details
@@ -166,53 +196,81 @@ def get_playlist_videos(url: str) -> list:
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
         )
         
-        if result.returncode != 0:
-            return []
+        # Capture full output for debugging
+        full_output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn Code: {result.returncode}"
         
-        data = json.loads(result.stdout)
+        if result.returncode != 0:
+            error_msg = f"yt-dlp failed with return code {result.returncode}"
+            if result.stderr:
+                error_msg += f"\nError: {result.stderr.strip()}"
+            return [], error_msg, full_output
+        
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            error_msg = f"Failed to parse yt-dlp JSON output: {e}\nOutput: {result.stdout[:500]}..."
+            return [], error_msg, full_output
+        
+        videos = []
         
         # Check if it's a playlist
         if 'entries' in data:
-            videos = []
             entries = data['entries']
-            
             for entry in entries:
-                if entry is not None:
-                    video_info = {
-                        'url': entry.get('url', ''),
-                        'title': entry.get('title', 'Unknown Video')
-                    }
-                    if video_info['url']:
-                        videos.append(video_info)
-            
-            return videos
+                if entry and isinstance(entry, dict):
+                    # For XVideos, use webpage_url to get the original page URL
+                    # For other sites, use url as fallback
+                    if mode == "xvideos":
+                        video_url = entry.get('webpage_url', entry.get('url', ''))
+                    else:
+                        video_url = entry.get('url', '')
+                    
+                    video_title = entry.get('title', 'Unknown Title')
+                    if video_url:
+                        videos.append({
+                            'url': video_url,
+                            'title': video_title
+                        })
         else:
-            # Single video - return as a single-item list
-            return [{
-                'url': data.get('webpage_url', url),
-                'title': data.get('title', 'Unknown Video')
-            }]
+            # Single video
+            if mode == "xvideos":
+                video_url = data.get('webpage_url', data.get('url', url))
+            else:
+                video_url = data.get('url', url)
             
+            video_title = data.get('title', 'Unknown Title')
+            videos.append({
+                'url': video_url,
+                'title': video_title
+            })
+        
+        return videos, None, full_output
+        
     except subprocess.TimeoutExpired:
-        return []
-    except (json.JSONDecodeError, subprocess.SubprocessError, Exception):
-        return []
+        return [], "yt-dlp command timed out after 30 seconds", None
+    except subprocess.SubprocessError as e:
+        return [], f"Subprocess error: {e}", None
+    except Exception as e:
+        return [], f"Unexpected error: {e}", None
 
 
-def probe_playlist(url: str) -> Tuple[int, Optional[str]]:
+def probe_playlist(url: str, mode: str = "youtube") -> Tuple[int, Optional[str], Optional[str], Optional[str]]:
     """
-    Probe a YouTube URL to determine if it's a playlist and get video count.
+    Probe a URL to determine if it's a playlist and get video count.
     
     Args:
-        url: The YouTube URL to probe
+        url: The URL to probe
+        mode: Either "youtube" or "xvideos" to determine validation rules
         
     Returns:
-        Tuple of (video_count, playlist_title)
-        - video_count: Number of videos (1 for single video, >1 for playlist)
+        Tuple of (video_count, playlist_title, error_details, yt_dlp_output)
+        - video_count: Number of videos (1 for single video, >1 for playlist, 0 for error)
         - playlist_title: Title of playlist (None for single videos)
+        - error_details: Detailed error information if failed
+        - yt_dlp_output: Raw yt-dlp output (stdout + stderr)
     """
-    if not is_valid_url(url):
-        return 0, None
+    if not is_valid_url(url, mode):
+        return 0, None, "Invalid URL format", None
     
     try:
         # Use bundled yt-dlp to get playlist information
@@ -232,10 +290,20 @@ def probe_playlist(url: str) -> Tuple[int, Optional[str]]:
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
         )
         
-        if result.returncode != 0:
-            return 0, None
+        # Capture full output for debugging
+        full_output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n\nReturn Code: {result.returncode}"
         
-        data = json.loads(result.stdout)
+        if result.returncode != 0:
+            error_msg = f"yt-dlp failed with return code {result.returncode}"
+            if result.stderr:
+                error_msg += f"\nError: {result.stderr.strip()}"
+            return 0, None, error_msg, full_output
+        
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            error_msg = f"Failed to parse yt-dlp JSON output: {e}\nOutput: {result.stdout[:500]}..."
+            return 0, None, error_msg, full_output
         
         # Check if it's a playlist
         if 'entries' in data:
@@ -244,15 +312,27 @@ def probe_playlist(url: str) -> Tuple[int, Optional[str]]:
             valid_entries = [entry for entry in entries if entry is not None]
             count = len(valid_entries)
             title = data.get('title', 'Unknown Playlist')
-            return count, title
+            return count, title, None, full_output
         else:
-            # Single video
-            return 1, None
+            # Single video - check if we need to use webpage_url
+            if mode == "xvideos":
+                # For XVideos, ensure we're using the original page URL
+                video_url = data.get('webpage_url', data.get('url', url))
+                # If the URL is a CDN URL, we need to use the original page URL
+                if 'cdn' in video_url and 'xvideos-cdn' in video_url:
+                    video_url = data.get('webpage_url', url)
+            else:
+                # For YouTube, use the original URL or webpage_url if available
+                video_url = data.get('webpage_url', data.get('url', url))
+            
+            return 1, None, None, full_output
             
     except subprocess.TimeoutExpired:
-        return 0, None
-    except (json.JSONDecodeError, subprocess.SubprocessError, Exception):
-        return 0, None
+        return 0, None, "yt-dlp command timed out after 30 seconds", None
+    except subprocess.SubprocessError as e:
+        return 0, None, f"Subprocess error: {e}", None
+    except Exception as e:
+        return 0, None, f"Unexpected error: {e}", None
 
 
 def validate_output_permissions(folder: str) -> bool:
@@ -484,4 +564,38 @@ def check_system_resources(output_folder: str) -> dict:
         status['network_ok'] = False
         status['errors'].append("No internet connection detected")
     
-    return status 
+    return status
+
+
+def is_adult_content_site(url: str) -> bool:
+    """
+    Check if the URL is from an adult content site.
+    
+    Args:
+        url: The URL to check
+        
+    Returns:
+        True if the URL is from an adult content site, False otherwise
+    """
+    try:
+        parsed = urlparse(url)
+        adult_domains = [
+            'xvideos.com',
+            'www.xvideos.com',
+            'm.xvideos.com',
+            'pornhub.com',
+            'www.pornhub.com',
+            'xnxx.com',
+            'www.xnxx.com',
+            'redtube.com',
+            'www.redtube.com',
+            'youporn.com',
+            'www.youporn.com',
+            'spankbang.com',
+            'www.spankbang.com',
+            'xhamster.com',
+            'www.xhamster.com'
+        ]
+        return parsed.netloc.lower() in adult_domains
+    except:
+        return False 
