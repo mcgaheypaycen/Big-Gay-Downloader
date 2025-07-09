@@ -238,14 +238,14 @@ class SidebarFrame(ctk.CTkFrame):
             
             # Create and add job(s) for each individual video
             for video in videos:
-                # Use the original URL instead of the extracted URL to avoid CDN URL issues
-                # The downloader will handle extracting the proper webpage_url during download
+                # Use the individual video URL from the playlist
+                # The get_playlist_videos function already handles CDN URL issues
                 job = DownloadJob(
-                    url=url,  # Use original URL, not video['url'] which might be a CDN URL
+                    url=video['url'],  # Use individual video URL from playlist
                     format=format_type,
                     output_folder=output_folder,
                     mode=platform,
-                    compatibility_mode=self.compatibility_toggle.get(),
+                    compatibility_mode=bool(self.compatibility_toggle.get()),
                     title=video['title']
                 )
                 self.add_job_callback(job)
